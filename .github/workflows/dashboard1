@@ -1,36 +1,544 @@
-# This is a basic workflow to help you get started with Actions
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine, PieChart, Pie, Cell, Legend, ScatterChart, Scatter, LabelList } from "recharts";
+import { motion } from "framer-motion";
+import { useState, useMemo, useRef } from "react";
+import { Slider } from "@/components/ui/slider";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { SlidersHorizontal, Search, Percent, Upload, FileSpreadsheet, FileText, Gauge, Activity, Sigma, BoxSelect } from "lucide-react";
+import * as XLSX from "xlsx";
 
-name: CI
+// ---------------- Types ----------------
+type SchoolRow = { name: string; pass: number };
 
-# Controls when the workflow will run
-on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
-  push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+// -------------- Component --------------
+export default function OTIREGIONALEDUCATIONDIRECTORATE_SHS2024DashboardWithInsights() {
+  // ---------------- STATE: data & uploads ----------------
+  const [allSchoolsBase, setAllSchoolsBase] = useState<SchoolRow[]>([
+    { name: "ST. MARY'S SEM. SHS", pass: 99.6 },
+    { name: "DODI PAPASE SHTS", pass: 99.1 },
+    { name: "OKADJAKROM SHTS", pass: 95.0 },
+    { name: "TAPAMAN SHTS", pass: 94.5 },
+    { name: "BUEMAN SHTS", pass: 93.8 },
+    { name: "AKPAFU SHTS", pass: 33.2 },
+    { name: "NKWANTA SOUTH TECH", pass: 44.6 },
+    { name: "KRACHI EAST SHS", pass: 47.5 },
+    { name: "WORWORA SHS", pass: 49.8 },
+  ]);
+  const [uploadInfo, setUploadInfo] = useState("");
+  const [uploadError, setUploadError] = useState("");
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  # Allows you to run this workflow manually from the Actions tab
-  workflow_dispatch:
+  // ---------------- Upload helpers ----------------
+  const normalise = (s: string) => s.replace(/\s+/g, "").replace(/[%]/g, "").toLowerCase();
+  const coerceRow = (row: Record<string, any>): SchoolRow | null => {
+    const keys = Object.keys(row || {});
+    const nameKey =
+      keys.find((k) => ["school", "name", "schoolname"].includes(normalise(k))) ||
+      keys.find((k) => typeof row[k] === "string");
+    const passKey =
+      keys.find((k) => ["pass", "passpercent", "passpercentage", "passrate", "overallpass"].includes(normalise(k))) ||
+      keys.find((k) => typeof row[k] === "number");
+    const name = nameKey ? String(row[nameKey]) : undefined;
+    // Strip everything except digits, dot and minus
+    const passRaw = passKey ? Number(String(row[passKey]).toString().replace(/[^0-9.\-]/g, "")) : NaN;
+    if (!name || !isFinite(passRaw)) return null;
+    return { name: name.trim(), pass: Math.max(0, Math.min(100, Number(passRaw))) };
+  };
+  const parseCSV = (text: string): SchoolRow[] => {
+    const lines = String(text).split(/\r?\n/).filter(Boolean);
+    if (!lines.length) return [];
+    const header = lines[0].split(",");
+    return (
+      lines.slice(1).map((line) => {
+        const cols = line.split(",");
+        const row: Record<string, any> = {};
+        header.forEach((h, i) => (row[h] = cols[i]));
+        return coerceRow(row);
+      }).filter(Boolean) as SchoolRow[]
+    );
+  };
+  const handleFile = async (file: File) => {
+    setUploadInfo("");
+    setUploadError("");
+    try {
+      if (file.name.toLowerCase().endsWith(".csv")) {
+        const text = await file.text();
+        const mapped = parseCSV(text);
+        if (!mapped.length) throw new Error("No valid rows detected in CSV.");
+        setAllSchoolsBase(mapped);
+        setUploadInfo(`Loaded ${mapped.length} records from CSV.`);
+        return;
+      }
+      const buf = await file.arrayBuffer();
+      const wb = XLSX.read(buf, { type: "array" });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const json: Record<string, any>[] = XLSX.utils.sheet_to_json(ws, { defval: null });
+      const mapped = json.map(coerceRow).filter(Boolean) as SchoolRow[];
+      if (!mapped.length) throw new Error("No valid rows detected in first sheet.");
+      setAllSchoolsBase(mapped);
+      setUploadInfo(`Loaded ${mapped.length} records from ${wb.SheetNames[0]}.`);
+    } catch (err: any) {
+      setUploadError(err?.message || "Failed to load file. Ensure it has School/Name and Pass columns.");
+    }
+  };
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
-jobs:
-  # This workflow contains a single job called "build"
-  build:
-    # The type of runner that the job will run on
-    runs-on: ubuntu-latest
+  // ---------------- Filters ----------------
+  const [range, setRange] = useState<[number, number]>([0, 100]);
+  const [q, setQ] = useState("");
+  const [selectedSchool, setSelectedSchool] = useState("");
+  const [selectedSchools, setSelectedSchools] = useState<string[]>([]);
+  const [tol, setTol] = useState(5);
 
-    # Steps represent a sequence of tasks that will be executed as part of the job
-    steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
+  const applyBand = (key: string) => {
+    const map: Record<string, [number, number]> = {
+      ALL: [0, 100],
+      "<50": [0, 50],
+      "50-59": [50, 59],
+      "60-69": [60, 69],
+      "70-79": [70, 79],
+      "80-89": [80, 89],
+      "90-100": [90, 100],
+    };
+    setRange(map[key] ?? [0, 100]);
+  };
+  const toggleSchool = (name: string) => setSelectedSchools((prev) => (prev.includes(name) ? prev.filter((n) => n !== name) : [...prev, name]));
+  const clearSelected = () => setSelectedSchools([]);
 
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
+  // ---------------- Derived views & metrics ----------------
+  const dataset = useMemo(() => allSchoolsBase.filter((r) => r && isFinite(r.pass)), [allSchoolsBase]);
+  const filteredSchools = useMemo(
+    () => dataset.filter((d) => d.pass >= range[0] && d.pass <= range[1] && (!q || d.name.toLowerCase().includes(q.toLowerCase()))),
+    [dataset, range, q]
+  );
+  const avgPass = useMemo(() => filteredSchools.reduce((acc, s) => acc + s.pass, 0) / (filteredSchools.length || 1), [filteredSchools]);
 
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
-        run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+  // KPIs over ENTIRE dataset
+  const kpis = useMemo(() => {
+    if (!dataset.length) return { n: 0, avg: 0, max: 0, min: 0 };
+    const n = dataset.length;
+    const avg = dataset.reduce((a, b) => a + b.pass, 0) / n;
+    const max = Math.max(...dataset.map((d) => d.pass));
+    const min = Math.min(...dataset.map((d) => d.pass));
+    return { n, avg, max, min };
+  }, [dataset]);
+
+  const top15 = useMemo(() => [...filteredSchools].sort((a, b) => b.pass - a.pass).slice(0, 15), [filteredSchools]);
+  const performanceBands = useMemo(() => {
+    const bandDefs = [
+      { key: "<50", lo: 0, hi: 49.999 },
+      { key: "50-59", lo: 50, hi: 59.999 },
+      { key: "60-69", lo: 60, hi: 69.999 },
+      { key: "70-79", lo: 70, hi: 79.999 },
+      { key: "80-89", lo: 80, hi: 89.999 },
+      { key: "90-100", lo: 90, hi: 100 },
+    ];
+    return bandDefs.map((b) => ({ band: b.key, n: filteredSchools.filter((s) => s.pass >= b.lo && s.pass <= b.hi).length }));
+  }, [filteredSchools]);
+
+  const bandData = useMemo(() => {
+    const avg = avgPass;
+    let above = 0, near = 0, below = 0;
+    filteredSchools.forEach((d) => {
+      if (d.pass > avg + 5) above++; else if (d.pass < avg - 5) below++; else near++;
+    });
+    return [
+      { name: "Above Avg", value: above },
+      { name: "Within ±5%", value: near },
+      { name: "Below Avg", value: below },
+    ];
+  }, [filteredSchools, avgPass]);
+  const scatterData = useMemo(() => filteredSchools.map((d, i) => ({ idx: i + 1, pass: d.pass, name: d.name })), [filteredSchools]);
+
+  // ----------- Insights helpers -----------
+  const withinAvg = filteredSchools.filter((s) => Math.abs(s.pass - avgPass) <= tol).length;
+  const outsideAvg = Math.max(filteredSchools.length - withinAvg, 0);
+  const avgPieData = [
+    { name: `Within Avg ±${tol}%`, value: withinAvg },
+    { name: "Outside Avg Band", value: outsideAvg },
+  ];
+  const pieColors = ["#2563eb", "#a5b4fc"];
+
+  const toPoint = (s: { pass: number; name: string }) => ({ x: s.pass, y: Math.abs(s.pass - avgPass), name: s.name });
+  const scatterBelow = filteredSchools.filter((s) => s.pass < avgPass - tol).map(toPoint);
+  const scatterWithin = filteredSchools.filter((s) => Math.abs(s.pass - avgPass) <= tol).map(toPoint);
+  const scatterAbove = filteredSchools.filter((s) => s.pass > avgPass + tol).map(toPoint);
+
+  const top10 = useMemo(() => [...filteredSchools].sort((a, b) => b.pass - a.pass).slice(0, 10), [filteredSchools]);
+  const bottom10 = useMemo(() => [...filteredSchools].sort((a, b) => a.pass - b.pass).slice(0, 10), [filteredSchools]);
+
+  const highPerformers = filteredSchools.filter((s) => s.pass >= 90).sort((a, b) => b.pass - a.pass);
+  const atRiskSchools = filteredSchools.filter((s) => s.pass < 50).sort((a, b) => a.pass - b.pass);
+  const midBandSchools = filteredSchools.filter((s) => s.pass >= 50 && s.pass < 70).sort((a, b) => a.pass - b.pass);
+  const aboveAvgCount = filteredSchools.filter((s) => s.pass > avgPass).length;
+  const belowAvgCount = Math.max(filteredSchools.length - aboveAvgCount, 0);
+
+  const downloadInsights = () => {
+    const lines = [
+      `OTI REGION SHS 2024 — Insights (current filters)`,
+      `Cohort size: ${filteredSchools.length}`,
+      `Mean pass %: ${avgPass.toFixed(1)}%`,
+      `Within ±${tol}% of mean: ${withinAvg}`,
+      `Above mean: ${aboveAvgCount}, Below mean: ${belowAvgCount}`,
+      `High performers (>=90%): ${highPerformers.slice(0, 10).map((s) => `${s.name} ${s.pass}%`).join('; ')}`,
+      `At-risk (<50%): ${atRiskSchools.slice(0, 10).map((s) => `${s.name} ${s.pass}%`).join('; ')}`,
+    ];
+    const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "dashboard_insights.txt";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadSelectedCSV = () => {
+    const header = ["School", "Pass %", "Diff vs Mean (%)"];
+    const rows = selectedSchools.map((name) => {
+      const row = filteredSchools.find((s) => s.name === name) || dataset.find((s) => s.name === name);
+      const pass = row ? row.pass : 0;
+      const diff = pass - avgPass;
+      return [name, pass.toFixed(1), diff.toFixed(1)];
+    });
+    const csv = [header, ...rows].map((r) => r.join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "selected_schools_comparison.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // ---------------- Render ----------------
+  return (
+    <div className="flex flex-col gap-6 p-6 bg-gray-50 min-h-screen">
+      {/* Header */}
+      <div className="text-center">
+        <h1 className="text-3xl font-extrabold tracking-wide text-gray-800">OTI REGION SHS 2024 PERFORMANCE DASHBOARD</h1>
+        <p className="text-gray-500">Upload CSV or Excel to visualize school performance</p>
+      </div>
+
+      {/* Upload */}
+      <Card className="rounded-2xl border border-slate-200 bg-white shadow-md">
+        <CardHeader className="bg-slate-900 text-white rounded-t-2xl">
+          <CardTitle className="text-lg flex items-center gap-2"><Upload className="w-4 h-4" /> Upload Data (CSV or Excel)</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="flex flex-col md:flex-row md:items-center gap-3">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csv, application/vnd.openxmlformats-officedocument.spreadsheetml.sheet, application/vnd.ms-excel"
+              className="block w-full text-sm file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-medium file:bg-slate-100 file:text-slate-700 hover:file:bg-slate-200"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) handleFile(f);
+              }}
+            />
+            <div className="flex gap-2 text-xs text-slate-600 flex-wrap">
+              <span className="inline-flex items-center gap-1"><FileSpreadsheet className="w-4 h-4" /> Excel: columns like <em>School</em>, <em>Pass</em></span>
+              <span className="inline-flex items-center gap-1"><FileText className="w-4 h-4" /> CSV: headers <em>name,pass</em> or similar</span>
+            </div>
+          </div>
+          {uploadInfo && <div className="mt-2 text-xs text-emerald-700">{uploadInfo}</div>}
+          {uploadError && <div className="mt-2 text-xs text-red-600">{uploadError}</div>}
+        </CardContent>
+      </Card>
+
+      {/* Filters */}
+      <Card className="border-0 shadow-xl rounded-2xl overflow-hidden">
+        <div className="bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 text-white p-5">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3"><SlidersHorizontal className="w-5 h-5 opacity-90" /><h2 className="text-lg font-semibold tracking-wide">Interactive Filters</h2></div>
+            <div className="hidden md:flex items-center gap-2 text-xs">
+              <span className="px-2 py-1 rounded-full bg-white/15">Cohort: <span className="font-semibold">{filteredSchools.length}</span></span>
+              <span className="px-2 py-1 rounded-full bg-white/15">Mean: <span className="font-semibold">{avgPass.toFixed(1)}%</span></span>
+            </div>
+          </div>
+        </div>
+        <CardContent className="bg-gradient-to-br from-slate-50 via-white to-slate-50">
+          <div className="grid gap-3 lg:grid-cols-7 items-center">
+            <div className="lg:col-span-3 relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+              <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search school name" className="pl-9 bg-white/90 border-slate-200 focus-visible:ring-indigo-500" />
+            </div>
+            <div className="lg:col-span-3">
+              <div className="text-xs text-slate-600 mb-1">Pass % Range: {range[0]}%–{range[1]}%</div>
+              <Slider value={range} onValueChange={setRange} min={0} max={100} step={1} />
+            </div>
+            <div className="lg:col-span-1 text-right text-xs text-slate-500">Use search and range to focus your cohort</div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* KPI Tiles (global dataset) */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        {[
+          { label: "Total Schools Analysed", value: kpis.n.toString(), color: "bg-blue-600" },
+          { label: "Average Pass %", value: `${kpis.avg.toFixed(1)}%`, color: "bg-green-600" },
+          { label: "Highest Pass %", value: `${kpis.max.toFixed(1)}%`, color: "bg-amber-600" },
+          { label: "Lowest Pass %", value: `${kpis.min.toFixed(1)}%`, color: "bg-purple-600" },
+        ].map((kpi, i) => (
+          <motion.div key={i} whileHover={{ scale: 1.05 }} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5, delay: i * 0.05, ease: "easeOut" }} className={`rounded-xl p-5 text-center text-white shadow-lg ${kpi.color}`}>
+            <p className="text-lg font-medium opacity-90">{kpi.label}</p>
+            <p className="text-4xl font-bold mt-1">{kpi.value}</p>
+          </motion.div>
+        ))}
+      </div>
+
+      {/* Detailed Summary Statistics */}
+      {(() => {
+        const arr = filteredSchools.map((d) => d.pass).sort((a, b) => a - b);
+        const quantile = (qv: number) => {
+          if (!arr.length) return 0;
+          const pos = (arr.length - 1) * qv;
+          const base = Math.floor(pos);
+          const rest = pos - base;
+          return arr[base + 1] !== undefined ? arr[base] + rest * (arr[base + 1] - arr[base]) : arr[base];
+        };
+        const median = quantile(0.5);
+        const p10 = quantile(0.1);
+        const p25 = quantile(0.25);
+        const p75 = quantile(0.75);
+        const p90 = quantile(0.9);
+        const min = arr[0] ?? 0;
+        const max = arr[arr.length - 1] ?? 0;
+        const rangeV = max - min;
+        const variance = arr.length > 1 ? arr.reduce((s, x) => s + Math.pow(x - avgPass, 2), 0) / (arr.length - 1) : 0;
+        const std = Math.sqrt(variance);
+        const iqr = p75 - p25;
+        const blocks = [
+          { metric: "Mean %", value: `${avgPass.toFixed(1)}%`, icon: Activity },
+          { metric: "Median %", value: `${median.toFixed(1)}%`, icon: Gauge },
+          { metric: "Std. Dev.", value: std.toFixed(2), icon: Sigma },
+          { metric: "IQR", value: iqr.toFixed(1), icon: BoxSelect },
+          { metric: "P10 / P90", value: `${p10.toFixed(1)}% / ${p90.toFixed(1)}%`, icon: Activity },
+          { metric: "P25 / P75", value: `${p25.toFixed(1)}% / ${p75.toFixed(1)}%`, icon: Activity },
+          { metric: "Min % / Max %", value: `${min.toFixed(1)}% / ${max.toFixed(1)}%`, icon: Activity },
+          { metric: "Range", value: rangeV.toFixed(1), icon: Activity },
+        ];
+        const palette = ["#0ea5e9","#10b981","#f59e0b","#8b5cf6","#ef4444","#14b8a6","#ec4899","#84cc16"];
+        return (
+          <Card className="rounded-2xl border border-slate-200 bg-white shadow-md overflow-hidden">
+            <CardHeader className="bg-gradient-to-r from-slate-800 via-slate-700 to-slate-800 text-white rounded-t-2xl border-b border-slate-600">
+              <CardTitle className="text-lg font-semibold tracking-wide">Detailed Summary Statistics</CardTitle>
+            </CardHeader>
+            <CardContent className="p-5">
+              <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                {blocks.map((b, i) => {
+                  const Icon = b.icon as any;
+                  return (
+                    <div key={i} className="rounded-xl p-4 text-white shadow-sm" style={{ background: palette[i % palette.length] }}>
+                      <div className="flex items-center justify-between text-sm opacity-90"><span className="inline-flex items-center gap-2"><Icon className="w-4 h-4"/> {b.metric}</span></div>
+                      <div className="mt-2 text-2xl font-extrabold">{b.value}</div>
+                      <div className="mt-1 text-xs opacity-90">Based on current filters</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </CardContent>
+          </Card>
+        );
+      })()}
+
+      {/* Charts Section */}
+      <div className="grid lg:grid-cols-3 gap-6">
+        {/* Bar chart */}
+        <Card className="lg:col-span-2 rounded-2xl">
+          <CardHeader><CardTitle>Top Schools by Pass %</CardTitle></CardHeader>
+          <CardContent className="h-80">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={top15} margin={{ top: 10, right: 20, left: 0, bottom: 40 }}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="name" angle={-35} textAnchor="end" interval={0} height={60} />
+                <YAxis domain={[0, 100]} />
+                <Tooltip />
+                <ReferenceLine y={avgPass} stroke="#334155" strokeDasharray="4 2" label={{ value: `Avg ${avgPass.toFixed(1)}%`, position: "insideTopRight" }} />
+                <Bar dataKey="pass" radius={[6, 6, 0, 0]}>
+                  {top15.map((_, idx) => (<Cell key={`c-${idx}`} fill={["#0ea5e9","#10b981","#f59e0b","#8b5cf6","#ef4444","#14b8a6","#ec4899","#84cc16","#06b6d4","#f97316"][idx % 10]} />))}
+                  <LabelList dataKey="pass" position="top" formatter={(v: number) => `${v.toFixed(1)}%`} />
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </CardContent>
+        </Card>
+
+        {/* Pie chart */}
+        <Card className="rounded-2xl">
+          <CardHeader><CardTitle>Performance Bands</CardTitle></CardHeader>
+          <CardContent className="h-80">
+            <ResponsiveContainer width="100%" height="100%">
+              <PieChart>
+                <Pie dataKey="value" data={bandData} outerRadius={100} label>
+                  {bandData.map((_, i) => (<Cell key={i} fill={["#2563eb", "#22c55e", "#f59e0b"][i % 3]} />))}
+                </Pie>
+                <Legend />
+                <Tooltip />
+              </PieChart>
+            </ResponsiveContainer>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Scatter chart */}
+      <Card className="rounded-2xl">
+        <CardHeader><CardTitle>Pass % Distribution (Clustering)</CardTitle></CardHeader>
+        <CardContent className="h-80">
+          <ResponsiveContainer width="100%" height="100%">
+            <ScatterChart margin={{ top: 10, right: 20, left: 0, bottom: 20 }}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="idx" name="School Index" />
+              <YAxis dataKey="pass" name="Pass %" domain={[0, 100]} />
+              <Tooltip cursor={{ strokeDasharray: "3 3" }} />
+              <ReferenceLine y={avgPass} stroke="#334155" strokeDasharray="4 2" />
+              <Scatter data={scatterData} line>
+                {scatterData.map((_, i) => (<Cell key={i} fill={["#0ea5e9","#10b981","#f59e0b","#8b5cf6","#ef4444","#14b8a6","#ec4899","#84cc16"][i % 8]} />))}
+              </Scatter>
+            </ScatterChart>
+          </ResponsiveContainer>
+        </CardContent>
+      </Card>
+
+      {/* Compare Multiple Schools */}
+      <Card className="border border-emerald-200 bg-white shadow-md">
+        <CardHeader className="bg-emerald-50">
+          <CardTitle className="text-emerald-900">Compare Multiple Schools</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid md:grid-cols-3 gap-4">
+            <div className="md:col-span-1 max-h-56 overflow-auto rounded border p-3">
+              <ul className="space-y-2 text-sm">
+                {filteredSchools.slice().sort((a, b) => a.name.localeCompare(b.name)).map((s) => (
+                  <li key={s.name} className="flex items-center gap-2">
+                    <input type="checkbox" id={`chk-${s.name}`} checked={selectedSchools.includes(s.name)} onChange={() => toggleSchool(s.name)} />
+                    <label htmlFor={`chk-${s.name}`} className="cursor-pointer flex-1">{s.name}</label>
+                    <span className="text-xs text-slate-500">{s.pass}%</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div className="md:col-span-2">
+              <ResponsiveContainer width="100%" height={300}>
+                {(() => {
+                  const selectedData = selectedSchools.map((name) => {
+                    const row = filteredSchools.find((s) => s.name === name) || dataset.find((s) => s.name === name);
+                    return { name, pass: row ? row.pass : 0 };
+                  }).sort((a, b) => b.pass - a.pass);
+                  return (
+                    <BarChart data={selectedData} layout="vertical" margin={{ top: 10, right: 18, bottom: 10, left: 80 }}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis type="number" domain={[0, 100]} />
+                      <YAxis type="category" dataKey="name" width={180} />
+                      <Tooltip />
+                      <ReferenceLine x={avgPass} stroke="#065f46" strokeDasharray="4 4" label={{ value: `Mean ${avgPass.toFixed(1)}%`, position: "top", fill: "#065f46" }} />
+                      <Bar dataKey="pass" radius={[0, 6, 6, 0]}>
+                        <LabelList dataKey="pass" position="right" />
+                        {selectedData.map((_, idx) => (
+                          <Cell key={`cmp-${idx}`} fill={["#0ea5e9", "#10b981", "#f59e0b", "#8b5cf6", "#ef4444", "#14b8a6", "#ec4899", "#84cc16", "#06b6d4", "#f97316"][idx % 10]} />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  );
+                })()}
+              </ResponsiveContainer>
+              <div className="flex items-center justify-between mt-3 text-sm">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <div>Selected: <span className="font-semibold">{selectedSchools.length}</span></div>
+                  {(() => {
+                    const ranked = selectedSchools.map((name) => {
+                      const row = filteredSchools.find((s) => s.name === name) || dataset.find((s) => s.name === name);
+                      return { name, pass: row ? row.pass : 0 };
+                    }).sort((a, b) => b.pass - a.pass).slice(0, 5);
+                    return (
+                      <div className="flex items-center gap-2 flex-wrap">
+                        {ranked.map((r, idx) => (
+                          <span key={r.name} className="px-2 py-0.5 rounded-full text-xs font-medium" style={{ background: ["#0ea5e9", "#10b981", "#f59e0b", "#8b5cf6", "#ef4444"][idx % 5], color: "white" }}>
+                            #{idx + 1} {r.name.split(" ").slice(0, 2).join(" ")} ({r.pass.toFixed(1)}%)
+                          </span>
+                        ))}
+                      </div>
+                    );
+                  })()}
+                </div>
+                <div className="space-x-2">
+                  <Button size="sm" variant="outline" onClick={() => setSelectedSchools(filteredSchools.map((s) => s.name))}>Select All (filtered)</Button>
+                  <Button size="sm" variant="secondary" onClick={clearSelected}>Clear</Button>
+                  <Button size="sm" onClick={downloadSelectedCSV}>Download CSV</Button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Insights & Recommendations */}
+      <Card className="border border-amber-200 bg-amber-50 shadow-md">
+        <CardHeader className="bg-amber-100"><CardTitle className="text-amber-900">Insights & Recommendations (Based on current filters)</CardTitle></CardHeader>
+        <CardContent>
+          <div className="grid md:grid-cols-3 gap-6">
+            <div className="rounded-xl bg-white p-4 border">
+              <p className="text-sm text-slate-600">Snapshot</p>
+              <ul className="mt-2 text-sm space-y-1">
+                <li><span className="font-semibold">Cohort size:</span> {filteredSchools.length}</li>
+                <li><span className="font-semibold">Mean pass %:</span> {avgPass.toFixed(1)}%</li>
+                <li><span className="font-semibold">Within ±{tol}% of mean:</span> {withinAvg}</li>
+                <li><span className="font-semibold">Above mean:</span> {aboveAvgCount} &nbsp; <span className="font-semibold">Below mean:</span> {belowAvgCount}</li>
+              </ul>
+            </div>
+            <div className="rounded-xl bg-white p-4 border">
+              <p className="text-sm text-slate-600">High performers (≥90%)</p>
+              {highPerformers.length === 0 ? (
+                <p className="text-xs italic text-slate-500 mt-2">None in current view.</p>
+              ) : (
+                <ul className="mt-2 text-sm list-disc list-inside space-y-1">
+                  {highPerformers.slice(0,6).map((s) => (
+                    <li key={s.name} className="flex justify-between"><span>{s.name}</span><span className="font-semibold">{s.pass}%</span></li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div className="rounded-xl bg-white p-4 border">
+              <p className="text-sm text-slate-600">At-risk schools (&lt;50%)</p>
+              {atRiskSchools.length === 0 ? (
+                <p className="text-xs italic text-slate-500 mt-2">None in current view.</p>
+              ) : (
+                <ul className="mt-2 text-sm list-disc list-inside space-y-1">
+                  {atRiskSchools.slice(0,6).map((s) => (
+                    <li key={s.name} className="flex justify-between"><span>{s.name}</span><span className="font-semibold">{s.pass}%</span></li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+          <div className="mt-6 grid md:grid-cols-2 gap-6">
+            <div className="rounded-xl bg-white p-4 border">
+              <p className="text-sm font-semibold text-slate-700">Recommended Actions</p>
+              <ul className="mt-2 text-sm space-y-2 list-disc list-inside">
+                <li>Deploy targeted remediation to <span className="font-semibold">{Math.min(atRiskSchools.length, 5)}</span> lowest performers (coaching, mock exams, study camps).</li>
+                <li>Expand peer-mentoring: pair top-5 schools with bottom-5 in subject-cluster exchanges.</li>
+                <li>Focus on the <span className="font-semibold">50–69%</span> band (<span className="font-semibold">{midBandSchools.length}</span> schools) with booster programs to push them above 70%.</li>
+                <li>Recognize and retain best practices from high performers (≥90%)—lesson-sharing clinics and leadership roundtables.</li>
+              </ul>
+            </div>
+            <div className="rounded-xl bg-white p-4 border">
+              <p className="text-sm font-semibold text-slate-700">Resource Targeting</p>
+              <ul className="mt-2 text-sm space-y-2 list-disc list-inside">
+                <li>Allocate extra materials and teacher support to schools outside the mean band (currently <span className="font-semibold">{outsideAvg}</span>).</li>
+                <li>Schedule monitoring visits for schools &lt;50% and review term action plans.</li>
+                <li>Use the filters to drill by performance window and export the list via <em>Download CSV</em>.</li>
+              </ul>
+              <div className="mt-3"><Button size="sm" onClick={downloadInsights}>Download Insights</Button></div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Footer */}
+      <footer className="fixed bottom-0 left-0 right-0 text-center py-4 bg-gray-800/90 backdrop-blur-md text-white text-sm shadow-inner z-50 border-t border-gray-700">
+        Developer: <span className="font-semibold text-blue-300">KEEP PREMIUM SOLUTIONS</span> — 0543932420 / 0240665162
+      </footer>
+    </div>
+  );
+}
